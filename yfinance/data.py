@@ -33,25 +33,7 @@ def lru_cache_freezeargs(func):
     return wrapped
 
 
-import threading
-class SingletonMeta(type):
-    """
-    Metaclass that creates a Singleton instance.
-    """
-    _instances = {}
-    _lock = threading.Lock()
-
-    def __call__(cls, *args, **kwargs):
-        with cls._lock:
-            if cls not in cls._instances:
-                instance = super().__call__(*args, **kwargs)
-                cls._instances[cls] = instance
-            else:
-                cls._instances[cls]._set_session(*args, **kwargs)
-            return cls._instances[cls]
-
-
-class YfData(metaclass=SingletonMeta):
+class YfData():
     """
     Have one place to retrieve data from Yahoo API in order to ease caching and speed up operations.
     Singleton means one session one cookie shared by all threads.
@@ -68,8 +50,8 @@ class YfData(metaclass=SingletonMeta):
             # Not caching
             self._session_is_caching = False
         else:
-            # Is caching. This is annoying. 
-            # Can't simply use a non-caching session to fetch cookie & crumb, 
+            # Is caching. This is annoying.
+            # Can't simply use a non-caching session to fetch cookie & crumb,
             # because then the caching-session won't have cookie.
             self._session_is_caching = True
             from requests_cache import DO_NOT_CACHE
@@ -80,40 +62,28 @@ class YfData(metaclass=SingletonMeta):
             utils.print_once("WARNING: cookie & crumb does not work well with requests_cache. Am experimenting with 'expire_after=DO_NOT_CACHE', but you need to help stress-test.")
 
         # Default to using 'basic' strategy
-        self._cookie_strategy = 'basic'
+        # self._cookie_strategy = 'basic'
         # If it fails, then fallback method is 'csrf'
-        # self._cookie_strategy = 'csrf'
-
-        self._cookie_lock = threading.Lock()
+        self._cookie_strategy = 'csrf'
 
     def _set_session(self, session):
         if session is None:
             return
-        with self._cookie_lock:
-            self._session = session
+        self._session = session
 
-    def _set_cookie_strategy(self, strategy, have_lock=False):
+    def _set_cookie_strategy(self, strategy):
         if strategy == self._cookie_strategy:
             return
-        if not have_lock:
-            self._cookie_lock.acquire()
 
-        try:
-            if self._cookie_strategy == 'csrf':
-                utils.get_yf_logger().debug(f'toggling cookie strategy {self._cookie_strategy} -> basic')
-                self._session.cookies.clear()
-                self._cookie_strategy = 'basic'
-            else:
-                utils.get_yf_logger().debug(f'toggling cookie strategy {self._cookie_strategy} -> csrf')
-                self._cookie_strategy = 'csrf'
-            self._cookie = None
-            self._crumb = None
-        except Exception:
-            self._cookie_lock.release()
-            raise
-
-        if not have_lock:
-            self._cookie_lock.release()
+        if self._cookie_strategy == 'csrf':
+            utils.get_yf_logger().debug(f'toggling cookie strategy {self._cookie_strategy} -> basic')
+            self._session.cookies.clear()
+            self._cookie_strategy = 'basic'
+        else:
+            utils.get_yf_logger().debug(f'toggling cookie strategy {self._cookie_strategy} -> csrf')
+            self._cookie_strategy = 'csrf'
+        self._cookie = None
+        self._crumb = None
 
     def _save_session_cookies(self):
         try:
@@ -160,7 +130,8 @@ class YfData(metaclass=SingletonMeta):
         # To avoid infinite recursion, do NOT use self.get()
         # - 'allow_redirects' copied from @psychoz971 solution - does it help USA?
         response = self._session.get(
-            url='https://fc.yahoo.com',
+            # url='https://fc.yahoo.com',
+            url='https://finance.yahoo.com',
             headers=self.user_agent_headers,
             proxies=proxy,
             timeout=timeout,
@@ -207,7 +178,7 @@ class YfData(metaclass=SingletonMeta):
 
         utils.get_yf_logger().debug(f"crumb = '{self._crumb}'")
         return self._crumb
-    
+
     @utils.log_indent_decorator
     def _get_cookie_and_crumb_basic(self, proxy, timeout):
         cookie = self._get_cookie_basic(proxy, timeout)
@@ -257,10 +228,10 @@ class YfData(metaclass=SingletonMeta):
             'originalDoneUrl': originalDoneUrl,
             'namespace': namespace,
         }
-        post_args = {**base_args, 
+        post_args = {**base_args,
             'url': f'https://consent.yahoo.com/v2/collectConsent?sessionId={sessionId}',
             'data': data}
-        get_args = {**base_args, 
+        get_args = {**base_args,
             'url': f'https://guce.yahoo.com/copyConsent?sessionId={sessionId}',
             'data': data}
         if self._session_is_caching:
@@ -288,7 +259,7 @@ class YfData(metaclass=SingletonMeta):
             return None
 
         get_args = {
-            'url': 'https://query2.finance.yahoo.com/v1/test/getcrumb', 
+            'url': 'https://query2.finance.yahoo.com/v1/test/getcrumb',
             'headers': self.user_agent_headers,
             'proxies': proxy,
             'timeout': timeout}
@@ -312,21 +283,21 @@ class YfData(metaclass=SingletonMeta):
 
         utils.get_yf_logger().debug(f"cookie_mode = '{self._cookie_strategy}'")
 
-        with self._cookie_lock:
-            if self._cookie_strategy == 'csrf':
-                crumb = self._get_crumb_csrf()
-                if crumb is None:
-                    # Fail
-                    self._set_cookie_strategy('basic', have_lock=True)
-                    cookie, crumb = self._get_cookie_and_crumb_basic(proxy, timeout)
-            else:
-                # Fallback strategy
+        if self._cookie_strategy == 'csrf':
+            crumb = self._get_crumb_csrf(proxy, timeout)
+            if crumb is None:
+                # Fail
+                self._set_cookie_strategy('basic')
                 cookie, crumb = self._get_cookie_and_crumb_basic(proxy, timeout)
-                if cookie is None or crumb is None:
-                    # Fail
-                    self._set_cookie_strategy('csrf', have_lock=True)
-                    crumb = self._get_crumb_csrf()
-            strategy = self._cookie_strategy
+        else:
+            # Fallback strategy
+            cookie, crumb = self._get_cookie_and_crumb_basic(proxy, timeout)
+
+            if cookie is None or crumb is None:
+                # Fail
+                self._set_cookie_strategy('csrf')
+                crumb = self._get_crumb_csrf(proxy, timeout)
+        strategy = self._cookie_strategy
         return cookie, crumb, strategy
 
     @utils.log_indent_decorator
@@ -345,7 +316,7 @@ class YfData(metaclass=SingletonMeta):
         if 'crumb' in params:
             raise Exception("Don't manually add 'crumb' to params dict, let data.py handle it")
 
-        cookie, crumb, strategy = self._get_cookie_and_crumb()
+        cookie, crumb, strategy = self._get_cookie_and_crumb(proxy, timeout)
         if crumb is not None:
             crumbs = {'crumb': crumb}
         else:
